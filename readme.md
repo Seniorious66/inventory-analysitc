@@ -80,7 +80,6 @@ Current design for the core `food_inventory` table:
 | `location` | VARCHAR | **Fridge, Freezer, Pantry** |
 | `quantity` | FLOAT | Current amount |
 | `unit` | VARCHAR | Standard unit (kg, L, pcs) |
-| `min_threshold` | FLOAT | Restock trigger level |
 | `expiry_date` | DATE | Best before date |
 | `status` | VARCHAR | IN_STOCK, CONSUMED, WASTED |
 
