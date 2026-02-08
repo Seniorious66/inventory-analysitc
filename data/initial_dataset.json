@@ -1,0 +1,137 @@
+[
+  {
+    "item_name": "Högrev 牛肩肉",
+    "category": "Meat",
+    "location": "freezer",
+    "quantity": 0.59,
+    "unit": "kg",
+    "expire_date": "2026-05-08",
+    "status": "in_stock"
+  },
+  {
+    "item_name": "牛肉 (小块剩料)",
+    "category": "Meat",
+    "location": "freezer",
+    "quantity": 0.12,
+    "unit": "kg",
+    "expire_date": "2026-03-08",
+    "status": "in_stock"
+  },
+  {
+    "item_name": "带骨羊腿",
+    "category": "Meat",
+    "location": "freezer",
+    "quantity": 0.80,
+    "unit": "kg",
+    "expire_date": "2026-08-01",
+    "status": "in_stock"
+  },
+  {
+    "item_name": "Salladskål 大白菜",
+    "category": "Vegetable",
+    "location": "fridge",
+    "quantity": 1.59,
+    "unit": "kg",
+    "expire_date": "2026-02-22",
+    "status": "in_stock"
+  },
+  {
+    "item_name": "胡萝卜",
+    "category": "Vegetable",
+    "location": "fridge",
+    "quantity": 0.26,
+    "unit": "kg",
+    "expire_date": "2026-03-01",
+    "status": "in_stock"
+  },
+  {
+    "item_name": "酸菜",
+    "category": "Vegetable",
+    "location": "fridge",
+    "quantity": 0.30,
+    "unit": "kg",
+    "expire_date": "2026-05-01",
+    "status": "in_stock"
+  },
+  {
+    "item_name": "香菜碎",
+    "category": "Vegetable",
+    "location": "freezer",
+    "quantity": 1.00,
+    "unit": "bunch",
+    "expire_date": "2026-05-01",
+    "status": "in_stock"
+  },
+  {
+    "item_name": "蒜",
+    "category": "Vegetable",
+    "location": "pantry",
+    "quantity": 1.00,
+    "unit": "piece",
+    "expire_date": "2026-03-15",
+    "status": "in_stock"
+  },
+  {
+    "item_name": "水浸金枪鱼",
+    "category": "Seafood",
+    "location": "pantry",
+    "quantity": 2.00,
+    "unit": "can",
+    "expire_date": "2027-01-01",
+    "status": "in_stock"
+  },
+  {
+    "item_name": "大米",
+    "category": "Staple",
+    "location": "pantry",
+    "quantity": 1.78,
+    "unit": "kg",
+    "expire_date": "2027-01-01",
+    "status": "in_stock"
+  },
+  {
+    "item_name": "炒年糕条",
+    "category": "Staple",
+    "location": "pantry",
+    "quantity": 0.35,
+    "unit": "kg",
+    "expire_date": "2026-06-01",
+    "status": "in_stock"
+  },
+  {
+    "item_name": "意大利面",
+    "category": "Staple",
+    "location": "pantry",
+    "quantity": 0.10,
+    "unit": "kg",
+    "expire_date": "2027-01-01",
+    "status": "in_stock"
+  },
+  {
+    "item_name": "粉/米皮",
+    "category": "Staple",
+    "location": "pantry",
+    "quantity": 1.00,
+    "unit": "pack",
+    "expire_date": "2027-01-01",
+    "status": "in_stock"
+  },
+  {
+    "item_name": "S&B咖喱块",
+    "category": "Seasoning",
+    "location": "pantry",
+    "quantity": 0.75,
+    "unit": "box",
+    "expire_date": "2026-09-01",
+    "status": "in_stock"
+  },
+  {
+    "item_name": "鹿茸菇/海带/竹荪",
+    "category": "Dry Goods",
+    "location": "pantry",
+    "quantity": 1.00,
+    "unit": "bag",
+    "expire_date": "2027-01-01",
+    "status": "in_stock"
+  }
+]
