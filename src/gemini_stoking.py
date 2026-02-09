@@ -70,14 +70,35 @@ def analyze_image(image_filename=None):
     # 2. 准备 Prompt (专用于提取 JSON)
     today_str = datetime.date.today().strftime("%Y-%m-%d")
     
-    # 这里的 Prompt 必须专注，不要加“管家”人设，只要“数据录入员”人设
+    # 购物小票识别 - 只提取做菜用的食材
     prompt_text = f"""
-    Identify all food items in this image.
-    Today is {today_str}. Calculate expiry dates based on this.
+    This is a shopping receipt image. Extract ONLY cooking ingredients that are used for preparing meals.
+    Today is {today_str}. Calculate expiry dates based on this date and typical shelf life.
+    
+    **INCLUDE these categories:**
+    - Fresh vegetables (蔬菜)
+    - Fresh fruits for cooking (水果，仅做菜用)
+    - Meat and poultry (肉类、禽类)
+    - Seafood and fish (海鲜、鱼类)
+    - Eggs and dairy products (蛋类、奶制品)
+    - Tofu and soy products (豆腐、豆制品)
+    - Fresh herbs (新鲜香料，如香菜、葱)
+    - Staple ingredients (主食原料：米、面、面包、面条)
+    - Frozen foods for cooking (速冻食材：饺子、汤圆等)
+    
+    **EXCLUDE these items (DO NOT include in output):**
+    - Seasonings and condiments (调味品：酱油、盐、糖、味精、鸡精、料酒等)
+    - Cooking oils (食用油、香油、橄榄油等)
+    - Beverages (饮料、果汁、茶、咖啡)
+    - Alcoholic drinks (酒类：啤酒、白酒、红酒等)
+    - Snacks and chips (零食、薯片、饼干)
+    - Instant noodles and ready-to-eat meals (方便面、即食食品)
+    - Household items (日用品、洗涤用品)
+    - Pre-packaged sauces (预制调料包、火锅底料)
     
     Return a list of objects with these exact fields:
     - item_name: (string) 中文翻译(原名)格式
-    - category: (string) e.g., Vegetable, Dairy, Meat.
+    - category: (string) e.g., Vegetable, Dairy, Meat, Seafood, Staple.
     - location: (string) "Fridge", "Freezer", or "Pantry".
     - quantity: (number)
     - unit: (string)
