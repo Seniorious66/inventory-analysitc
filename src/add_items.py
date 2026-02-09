@@ -76,7 +76,7 @@ def load_json_to_db(filename):
                 item.get('quantity', 1),
                 item.get('unit', '个'),
                 item.get('expiry_date'),
-                item.get('status', 'IN_STOCK')
+                item.get('status', 'in_stock')
             )
             
             cur.execute(sql_query, record)

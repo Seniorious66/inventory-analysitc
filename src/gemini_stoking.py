@@ -96,14 +96,14 @@ def analyze_image(image_filename=None):
     - Household items (日用品、洗涤用品)
     - Pre-packaged sauces (预制调料包、火锅底料)
     
-    Return a list of objects with these exact fields:
+    Return a list of objects with these exact fields(所有字母小写):
     - item_name: (string) 中文翻译(原名)格式
-    - category: (string) e.g., Vegetable, Dairy, Meat, Seafood, Staple.
-    - location: (string) "Fridge", "Freezer", or "Pantry".
+    - category: (string) e.g., vegetable, dairy, meat, seafood, staple.
+    - location: (string) "fridge", "freezer", or "pantry".
     - quantity: (number)
     - unit: (string)
     - expiry_date: (string) YYYY-MM-DD.
-    - status: (string) "IN_STOCK"
+    - status: (string) "in_stock"
     """
 
     # 3. 读取图片
