@@ -62,7 +62,7 @@ def analyze_image(image_filename=None):
         
     if not image_filename:
         print("❌ images 文件夹里没有任何图片！请放入 .jpg 或 .png 文件。")
-        return
+        return None
 
     image_path = os.path.join(images_dir, image_filename)
     print(f"📸 正在读取照片: {image_filename}")
@@ -111,7 +111,7 @@ def analyze_image(image_filename=None):
         image = Image.open(image_path)
     except Exception as e:
         print(f"❌ 图片文件损坏或无法读取: {e}")
-        return
+        return None
 
     print("🤖 正在发送给 Gemini (使用新版 google-genai 库)...")
     
@@ -141,10 +141,12 @@ def analyze_image(image_filename=None):
             
         print(f"💾 JSON 已保存: data/{output_filename}")
         print(f"💡 自动入库命令: uv run src/add_items.py {output_filename}")
+        
+        return output_filename  # 返回文件名给调用者
 
     except Exception as e:
         print(f"❌ AI 分析失败: {e}")
-        # 如果是 API Key 问题，这里会报错
+        return None  # 失败时返回 None
 
 # ==========================================
 # 4. 入口
