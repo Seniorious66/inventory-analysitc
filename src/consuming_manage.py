@@ -118,7 +118,7 @@ def execute_actions(actions, inventory_snapshot=None):
             act_type = action.get('action')
             
             if act_type == 'UPDATE':
-                # 用于：移动位置、修改剩余数量、调整保质期
+                # 用于：仅移动位置、调整保质期（数量不变）
                 # 动态构建 SQL，只更新提供的字段
                 update_fields = []
                 update_values = []
@@ -127,9 +127,10 @@ def execute_actions(actions, inventory_snapshot=None):
                     update_fields.append("location=%s")
                     update_values.append(action['location'])
                 
+                # 注意：quantity 不应该在 UPDATE 中出现！
                 if 'quantity' in action:
-                    update_fields.append("quantity=%s")
-                    update_values.append(action['quantity'])
+                    print(f"   ⚠️  警告：UPDATE 操作不应修改数量！ID {action['id']}")
+                    # 跳过 quantity 更新
                 
                 if 'status' in action:
                     update_fields.append("status=%s")
@@ -149,34 +150,66 @@ def execute_actions(actions, inventory_snapshot=None):
                 
                 expiry_info = f", 保质期至 {action.get('expiry_date')}" if 'expiry_date' in action else ""
                 location_info = f" @ {action['location']}" if 'location' in action else ""
-                print(f"   🔧 修改 ID {action['id']}: 剩 {action.get('quantity', '?')}{location_info}{expiry_info}")
+                print(f"   🔧 修改 ID {action['id']}: {location_info}{expiry_info}")
 
             elif act_type == 'INSERT':
-                # 用于：切割出来的新肉块
-                sql = """
-                    INSERT INTO inventory (item_name, category, location, quantity, unit, expiry_date, status)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """
-                # 默认 category 和 unit 需要 AI 补全，或者从父级继承
-                cur.execute(sql, (
-                    action['item_name'],
-                    action.get('category', 'uncategorized'),
-                    action['location'],
-                    action['quantity'],
-                    action['unit'],
-                    action['expiry_date'],
-                    'in_stock'
-                ))
-                print(f"   ➕ 新增: {action['item_name']} ({action['quantity']}) -> {action['location']}")
+                # 用于：切割出来的新肉块（可能有 parent_id）
+                parent_id = action.get('parent_id')  # 分割场景会有父节点 ID
+                child_status = action.get('status', 'in_stock')  # 子节点可能是 in_stock 或 consumed
+                
+                if parent_id:
+                    # 有父节点：这是分割子节点
+                    sql = """
+                        INSERT INTO inventory (item_name, category, location, quantity, unit, expiry_date, status, parent_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """
+                    cur.execute(sql, (
+                        action['item_name'],
+                        action.get('category', 'uncategorized'),
+                        action.get('location', 'fridge'),  # consumed 的可能没有 location
+                        action['quantity'],
+                        action['unit'],
+                        action.get('expiry_date'),
+                        child_status,
+                        parent_id
+                    ))
+                    status_emoji = "🗑️" if child_status == 'consumed' else "📦"
+                    print(f"   {status_emoji} 新增子项 (父ID={parent_id}): {action['item_name']} ({action['quantity']}{action['unit']}) -> {child_status}")
+                else:
+                    # 无父节点：普通新增
+                    sql = """
+                        INSERT INTO inventory (item_name, category, location, quantity, unit, expiry_date, status)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """
+                    cur.execute(sql, (
+                        action['item_name'],
+                        action.get('category', 'uncategorized'),
+                        action['location'],
+                        action['quantity'],
+                        action['unit'],
+                        action['expiry_date'],
+                        'in_stock'
+                    ))
+                    print(f"   ➕ 新增: {action['item_name']} ({action['quantity']}) -> {action['location']}")
 
-            elif act_type == 'CONSUME_LOG':
-                # 用于：完全消耗掉的，或者切割消耗掉的部分
-                # 实际上我们可以选择 update status='CONSUMED' 或者 insert 一条 consumer 记录
-                # 这里简单起见，如果 ID 存在，就 Update；如果是新产生的消耗，就 Insert
-                # 简化逻辑：如果是切割场景，通常是把母体标记为 CONSUMED/SPLIT，然后生成新的
+            elif act_type == 'MARK_PROCESSED':
+                # 用于：将父节点标记为 processed（数量保持不变）
                 if 'id' in action:
-                    cur.execute("UPDATE inventory SET status='consumed', quantity=0 WHERE id=%s", (action['id'],))
-                    print(f"   🗑️ 消耗/归零 ID {action['id']}")
+                    # 只修改 status，不修改 quantity
+                    cur.execute("UPDATE inventory SET status='processed' WHERE id=%s", (action['id'],))
+                    print(f"   ✂️ 标记为已处理 ID {action['id']} (数量保持不变)")
+            
+            elif act_type == 'MARK_WASTE':
+                # 用于：标记为浪费（数量保持不变）
+                if 'id' in action:
+                    cur.execute("UPDATE inventory SET status='waste' WHERE id=%s", (action['id'],))
+                    print(f"   🗑️ 标记为废弃 ID {action['id']} (数量保持不变)")
+            
+            elif act_type == 'CONSUME_LOG':
+                # 用于：完全消耗掉的（数量保持不变）
+                if 'id' in action:
+                    cur.execute("UPDATE inventory SET status='consumed' WHERE id=%s", (action['id'],))
+                    print(f"   ✅ 标记为已消耗 ID {action['id']} (数量保持不变)")
         
         conn.commit()
         print("✅ 所有操作已提交！")
@@ -233,7 +266,8 @@ def parse_and_execute(user_command):
     - quantity: (number) MUST maintain the SAME UNIT as the original item. DO NOT convert units (e.g., if item is in "g", keep it in "g", don't convert to "kg")
     - unit: (string) e.g., "kg", "g", "个", "瓶" - MUST match the original item's unit
     - expiry_date: (string) YYYY-MM-DD format
-    - status: (string) "in_stock" or "consumed" (lowercase with underscore)
+    - status: (string) "in_stock", "consumed", "processed", or "waste" (lowercase with underscore)
+    - parent_id: (number, optional) Used in split scenarios to track which parent item was split
     
     CRITICAL UNIT HANDLING:
     - When calculating remaining quantity, NEVER change the unit
@@ -267,39 +301,80 @@ def parse_and_execute(user_command):
          * Item category and specific food type
        - Be conservative for safety: when in doubt, use shorter expiry dates
     
-    3. **Logic**:
-       - If consuming part of an item: UPDATE the quantity (and status if needed). DO NOT include location unless moving it.
-       - If consuming all: UPDATE status to 'consumed', quantity to 0. DO NOT include location.
-       - If moving location: UPDATE location AND expiry_date (YOU must recalculate based on the item and new environment). Include the item's current quantity and status.
-       - If SPLITTING (e.g., cut 1kg into 3 parts):
-         - Action 1: Mark the original parent ID as 'consumed' (or quantity 0).
-         - Action 2: INSERT new items for the parts that are kept.
-         - Action 3: (Optional) INSERT new items for parts consumed immediately (with status 'consumed') OR just ignore them if user only tracks stock.
+    3. **Logic** - CRITICAL: NEVER modify parent item's quantity:
+       - Parent items must keep their original quantity for statistical tracking
+       - All quantity changes must create new child items with parent_id
+       
+       - If consuming part of an item (e.g., use 500g from 1000g):
+         * Action 1: MARK_PROCESSED on parent (keeps original 1000g intact)
+         * Action 2: INSERT child with remaining amount (500g, status='in_stock', parent_id)
+         * Action 3: INSERT child for consumed amount (500g, status='consumed', parent_id)
+       
+       - If consuming all (eaten/used up entire item):
+         * Use CONSUME_LOG action (keeps quantity, only changes status to 'consumed')
+       
+       - If item is wasted (spoiled, tastes bad, thrown away):
+         * Use MARK_WASTE action (keeps quantity, only changes status to 'waste')
+       
+       - If moving location ONLY (quantity unchanged):
+         * UPDATE location AND expiry_date (recalculate based on new environment)
+         * DO NOT include quantity in UPDATE
+       
+       - If SPLITTING/DIVIDING (e.g., cut 1kg meat into 250g, 350g, 400g pieces):
+         * Action 1: MARK_PROCESSED on parent (keeps original 1kg)
+         * Action 2+: INSERT child items with parent_id:
+           - For pieces to be stored: INSERT with status='in_stock', include location, expiry_date, parent_id
+           - For pieces consumed immediately: INSERT with status='consumed', parent_id
+         * Each child must have the same item_name, category, unit as parent
+         * Sum of all children quantities should equal original parent quantity
     
     4. **Output Format** (Strict JSON list):
     Examples:
-    [\n      // Consuming (no location change - don't include location field):
-      {{ "action": "UPDATE", "id": 10, "quantity": 5, "status": "in_stock", "expiry_date": "2026-02-15" }},
+    [
+      // Consuming PART (500g from 1000g) - MUST use MARK_PROCESSED + INSERT children:
+      {{ "action": "MARK_PROCESSED", "id": 10 }},
+      {{ "action": "INSERT", "item_name": "猪肉", "quantity": 500, "unit": "g", "location": "fridge", "category": "meat", "expiry_date": "2026-02-15", "parent_id": 10, "status": "in_stock" }},
+      {{ "action": "INSERT", "item_name": "猪肉", "quantity": 500, "unit": "g", "category": "meat", "parent_id": 10, "status": "consumed" }},
       
-      // Fully consumed (no location field needed):
+      // Consuming ALL (entire item eaten/used):
       {{ "action": "CONSUME_LOG", "id": 13 }},
       
-      // Moving location (MUST include location and recalculate expiry):
-      {{ "action": "UPDATE", "id": 12, "quantity": 0.5, "location": "fridge", "status": "in_stock", "expiry_date": "2026-02-16" }},
+      // Wasted ALL (entire item spoiled/thrown away):
+      {{ "action": "MARK_WASTE", "id": 14 }},
       
-      // Creating new item (MUST include location):
-      {{ "action": "INSERT", "item_name": "切片猪肉", "quantity": 0.35, "unit": "kg", "location": "freezer", "category": "meat", "expiry_date": "2026-08-09" }}
+      // Moving location ONLY (quantity unchanged - no MARK_PROCESSED needed):
+      {{ "action": "UPDATE", "id": 12, "location": "fridge", "expiry_date": "2026-02-16" }},
+      
+      // SPLITTING scenario - cut 1kg meat (ID=15) into 3 pieces (all stored):
+      {{ "action": "MARK_PROCESSED", "id": 15 }},
+      {{ "action": "INSERT", "item_name": "猪肉", "quantity": 250, "unit": "g", "location": "freezer", "category": "meat", "expiry_date": "2026-08-10", "parent_id": 15, "status": "in_stock" }},
+      {{ "action": "INSERT", "item_name": "猪肉", "quantity": 350, "unit": "g", "location": "fridge", "category": "meat", "expiry_date": "2026-02-16", "parent_id": 15, "status": "consumed" }},
+      {{ "action": "INSERT", "item_name": "猪肉", "quantity": 400, "unit": "g", "location": "freezer", "category": "meat", "expiry_date": "2026-08-10", "parent_id": 15, "status": "in_stock" }}
     ]
     
     CRITICAL REQUIREMENTS:
-    - Include "location" field ONLY when moving items or creating new items (INSERT)
-    - When only consuming/reducing quantity, DO NOT include "location" field
-    - Always include "expiry_date" in UPDATE and INSERT actions
+    - NEVER modify parent item's quantity - it must remain intact for statistical purposes
+    - For partial consumption, use MARK_PROCESSED + INSERT children (one for remaining, one for consumed)
+    - UPDATE is ONLY for location/expiry changes, NEVER for quantity changes
+    - Include "location" field for INSERT with status='in_stock', can omit for status='consumed'
+    - Always include "expiry_date" in UPDATE and INSERT actions with status='in_stock'
     - Calculate expiry_date intelligently based on storage location and item category
-    - ALL field values MUST be lowercase (location: "fridge"/"freezer"/"pantry", category: "meat"/"vegetable"/etc., status: "in_stock"/"consumed")
+    - ALL field values MUST be lowercase (location: "fridge"/"freezer"/"pantry", category: "meat"/"vegetable"/etc., status: "in_stock"/"consumed"/"processed"/"waste")
     - NEVER use capitalized location names like "Fridge", "Freezer", "Room Temperature"
     - NEVER use Chinese for location (不要用"冰箱"/"冷冻"/"冷冻室"/"室温"等中文)
     - When user says "冰箱" → use "fridge", "冷冻/冷冻室" → use "freezer", "室温/常温" → use "pantry"
+    
+    STATUS DECISION GUIDE:
+    - "consumed": Normal consumption (eaten, used up) - use CONSUME_LOG
+    - "waste": Spoiled, tastes bad, thrown away, discarded - use MARK_WASTE
+    - "processed": Item was split/divided into multiple parts - use MARK_PROCESSED (then INSERT children with parent_id)
+    - "in_stock": Currently available in storage
+    
+    WASTE TRIGGERS (use MARK_WASTE when user says):
+    - "坏了", "变质了", "发霉了", "过期了"
+    - "难吃", "太难吃了", "不好吃"
+    - "扔了", "扔掉了", "丢了"
+    - "不要了", "不想要了"
     """
 
     print("🤖 正在思考如何操作数据库...")
