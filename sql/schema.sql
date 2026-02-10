@@ -8,8 +8,10 @@ create table inventory(
 		check (location in ('fridge','freezer','pantry')),
 	quantity numeric(10,2) default 1.0,
 	unit varchar(20),
-	expiry_date date,
-	created_at timestamp default current_timestamp,
+	expire_date date,
+	created_at timestampz default current_timestamp,
+	updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 	status varchar(20) default 'in_stock'
 		check (status in ('in_stock','consumed','wasted'))
+	parent_id INT
 );
