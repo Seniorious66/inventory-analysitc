@@ -33,11 +33,12 @@ def fetch_current_inventory():
     """获取所有在库物品，供 AI 参考"""
     conn = get_db_connection()
     cur = conn.cursor()
-    # 我们只需要 ID, 名字, 位置, 数量, 单位，用来给 AI 做匹配
+    # 按创建时间排序，实现先进先出（FIFO）
     cur.execute("""
-        SELECT id, item_name, quantity, unit, location, expiry_date, status
+        SELECT id, item_name, quantity, unit, location, expiry_date, status, created_at
         FROM inventory 
         WHERE UPPER(status) = 'IN_STOCK'
+        ORDER BY created_at ASC
     """)
     rows = cur.fetchall()
     
@@ -49,7 +50,8 @@ def fetch_current_inventory():
             "qty": float(row[2]), # 转成 float 方便 AI 计算
             "unit": row[3],
             "loc": row[4],
-            "exp": str(row[5])
+            "exp": str(row[5]),
+            "created": row[7].strftime('%Y-%m-%d %H:%M:%S') if row[7] else None
         })
     
     cur.close()
@@ -67,8 +69,46 @@ def execute_actions(actions, inventory_snapshot=None):
     if inventory_snapshot:
         print("🔍 验证 AI 计算...")
         has_warnings = False
+        has_errors = False
         
         for action in actions:
+            if action.get('action') == 'INSERT' and 'parent_id' in action:
+                # 检查新增子项的数量合理性
+                parent_id = action['parent_id']
+                new_qty = action['quantity']
+                unit = action['unit']
+                
+                # 从快照中找到父项数据
+                parent = next((item for item in inventory_snapshot if item['id'] == parent_id), None)
+                if parent:
+                    parent_qty = parent['qty']
+                    parent_unit = parent['unit']
+                    item_name = parent['name']
+                    
+                    # 检查：单位不匹配
+                    if unit != parent_unit:
+                        has_errors = True
+                        print(f"\n   ❌ 【严重错误】ID {parent_id} ({item_name})")
+                        print(f"       父项单位: {parent_unit}, 但子项使用了: {unit}")
+                        print(f"       单位必须保持一致！")
+                    
+                    # 检查：离散单位不应该有小数
+                    discrete_units = ['颗', '个', 'pack', '片', '块', '条', '根']
+                    if unit in discrete_units and new_qty != int(new_qty):
+                        has_errors = True
+                        print(f"\n   ❌ 【严重错误】ID {parent_id} ({item_name})")
+                        print(f"       单位 '{unit}' 是离散单位，不应该有小数")
+                        print(f"       AI 返回的数量: {new_qty}{unit}")
+                        print(f"       这表明 AI 的计算出错了！")
+                    
+                    # 检查：子项数量大于父项
+                    if new_qty > parent_qty:
+                        has_warnings = True
+                        print(f"\n   ⚠️  【异常】ID {parent_id} ({item_name})")
+                        print(f"       父项总量: {parent_qty}{parent_unit}")
+                        print(f"       子项数量: {new_qty}{unit}")
+                        print(f"       子项数量超过父项！")
+            
             if action.get('action') == 'UPDATE' and 'quantity' in action:
                 item_id = action['id']
                 new_qty = action['quantity']
@@ -104,12 +144,49 @@ def execute_actions(actions, inventory_snapshot=None):
                         print(f"       AI 计算后: {new_qty}{original_unit}")
                         print(f"       计算的消耗量为负: {consumed_amount}{original_unit}")
                     
-                    # 检查 4: 信息性提示（正常消耗）
+                    # 检查：信息性提示（正常消耗）
                     elif consumed_amount > 0:
                         print(f"   ✓ ID {item_id} ({item_name}): {original_qty}{original_unit} → {new_qty}{original_unit} (消耗 {consumed_amount}{original_unit})")
         
+        # 检查：验证分割操作的总和
+        # 统计每个父项的所有子项数量总和
+        parent_children_map = {}
+        for action in actions:
+            if action.get('action') == 'INSERT' and 'parent_id' in action:
+                parent_id = action['parent_id']
+                quantity = action['quantity']
+                if parent_id not in parent_children_map:
+                    parent_children_map[parent_id] = []
+                parent_children_map[parent_id].append(quantity)
+        
+        # 验证每个父项的子项总和
+        for parent_id, child_quantities in parent_children_map.items():
+            parent = next((item for item in inventory_snapshot if item['id'] == parent_id), None)
+            if parent:
+                parent_qty = parent['qty']
+                parent_unit = parent['unit']
+                item_name = parent['name']
+                children_sum = sum(child_quantities)
+                
+                # 允许浮点误差
+                epsilon = 0.01
+                if abs(children_sum - parent_qty) > epsilon:
+                    has_errors = True
+                    print(f"\n   ❌ 【严重错误】ID {parent_id} ({item_name})")
+                    print(f"       父项总量: {parent_qty}{parent_unit}")
+                    print(f"       子项总和: {children_sum}{parent_unit}")
+                    print(f"       差异: {abs(children_sum - parent_qty)}{parent_unit}")
+                    print(f"       子项总和必须等于父项数量！")
+                else:
+                    print(f"   ✓ ID {parent_id} ({item_name}): 子项总和 {children_sum}{parent_unit} = 父项 {parent_qty}{parent_unit}")
+        
         if not has_warnings:
             print("   ✅ 验证通过，无异常")
+        elif has_errors:
+            print("\n   ❌ 发现严重错误，中止执行！")
+            print("   请检查用户命令或AI的理解是否有误")
+            conn.close()
+            return
         else:
             print("\n   ⚠️  发现异常，但将继续执行。如需中止请按 Ctrl+C")
     
@@ -144,6 +221,8 @@ def execute_actions(actions, inventory_snapshot=None):
                     print(f"   ⚠️  警告：UPDATE 操作 ID {action['id']} 没有提供任何更新字段")
                     continue
                 
+                # 添加 updated_at 字段更新
+                update_fields.append("updated_at=CURRENT_TIMESTAMP")
                 update_values.append(action['id'])  # WHERE 条件的 ID
                 sql = f"UPDATE inventory SET {', '.join(update_fields)} WHERE id=%s"
                 cur.execute(sql, tuple(update_values))
@@ -195,20 +274,20 @@ def execute_actions(actions, inventory_snapshot=None):
             elif act_type == 'MARK_PROCESSED':
                 # 用于：将父节点标记为 processed（数量保持不变）
                 if 'id' in action:
-                    # 只修改 status，不修改 quantity
-                    cur.execute("UPDATE inventory SET status='processed' WHERE id=%s", (action['id'],))
+                    # 只修改 status，不修改 quantity，但要更新 updated_at
+                    cur.execute("UPDATE inventory SET status='processed', updated_at=CURRENT_TIMESTAMP WHERE id=%s", (action['id'],))
                     print(f"   ✂️ 标记为已处理 ID {action['id']} (数量保持不变)")
             
             elif act_type == 'MARK_WASTE':
                 # 用于：标记为浪费（数量保持不变）
                 if 'id' in action:
-                    cur.execute("UPDATE inventory SET status='waste' WHERE id=%s", (action['id'],))
+                    cur.execute("UPDATE inventory SET status='waste', updated_at=CURRENT_TIMESTAMP WHERE id=%s", (action['id'],))
                     print(f"   🗑️ 标记为废弃 ID {action['id']} (数量保持不变)")
             
             elif act_type == 'CONSUME_LOG':
                 # 用于：完全消耗掉的（数量保持不变）
                 if 'id' in action:
-                    cur.execute("UPDATE inventory SET status='consumed' WHERE id=%s", (action['id'],))
+                    cur.execute("UPDATE inventory SET status='consumed', updated_at=CURRENT_TIMESTAMP WHERE id=%s", (action['id'],))
                     print(f"   ✅ 标记为已消耗 ID {action['id']} (数量保持不变)")
         
         conn.commit()
@@ -239,142 +318,93 @@ def parse_and_execute(user_command):
     
     # 打印用户命令中提到的物品的当前库存（用于审计）
     print(f"📝 用户命令: {user_command}")
-    print("📦 相关物品当前库存快照:")
-    for item in current_inventory[:5]:  # 只显示前5个作为示例
-        print(f"   ID {item['id']}: {item['name']} = {item['qty']}{item['unit']} @ {item['loc']}")
-    if len(current_inventory) > 5:
-        print(f"   ... 以及其他 {len(current_inventory) - 5} 项")
+    print("📦 当前所有在库物品（按创建时间排序，先进先出）:")
+    for item in current_inventory:
+        created_info = f" [创建:{item['created']}]" if item.get('created') else ""
+        print(f"   ID {item['id']}: {item['name']} = {item['qty']}{item['unit']} @ {item['loc']}{created_info}")
 
     prompt = f"""
-    You are a database administrator for a home inventory system.
-    Today is {today}.
-    
-    ### CURRENT INVENTORY (Database State):
+    你是家庭库存管理系统的数据库管理员。今天是 {today}。
+
+    ### 当前库存（按创建时间排序，最早的在前）：
     {inventory_str}
 
-    ### USER COMMAND:
+    ### 用户指令：
     "{user_command}"
 
-    ### YOUR TASK:
-    Generate a JSON plan to update the database to reflect the user's command.
-    
-    ### FIELD FORMAT REQUIREMENTS (STRICT):
-    ALL fields must use lowercase with underscores (snake_case):
-    - item_name: (string) Item name in Chinese/original language
-    - category: (string) "vegetable", "dairy", "meat", "seafood", "staple", "fruit", "snack", "beverage", or "uncategorized"
-    - location: (string) ONLY "fridge", "freezer", or "pantry" (lowercase, no other values allowed)
-    - quantity: (number) MUST maintain the SAME UNIT as the original item. DO NOT convert units (e.g., if item is in "g", keep it in "g", don't convert to "kg")
-    - unit: (string) e.g., "kg", "g", "个", "瓶" - MUST match the original item's unit
-    - expiry_date: (string) YYYY-MM-DD format
-    - status: (string) "in_stock", "consumed", "processed", or "waste" (lowercase with underscore)
-    - parent_id: (number, optional) Used in split scenarios to track which parent item was split
-    
-    CRITICAL UNIT HANDLING:
-    - When calculating remaining quantity, NEVER change the unit
-    - Example: If item has 1000g and user consumes 500g, result should be 500 (in "g"), NOT 0.5 (mistakenly thinking it's kg)
-    - Always check the original "unit" field and perform calculations in that exact unit
-    - 1000g - 500g = 500g (quantity: 500, unit: "g")
-    - 1.5kg - 0.5kg = 1kg (quantity: 1, unit: "kg")
-    
-    CALCULATION VERIFICATION:
-    - When doing quantity updates, double-check your math
-    - For consumption: NEW quantity = ORIGINAL quantity (from inventory) - CONSUMED amount
-    - Example from inventory: {{"id": 10, "qty": 1000, "unit": "g"}} 
-      User consumes 500g → NEW quantity = 1000 - 500 = 500g (NOT 400g, NOT 0.5)
-    - If consuming ALL, quantity becomes 0
-    
-    ### RULES:
-    1. **Identify**: Find the correct item ID from the inventory list based on the user's description (e.g., "270g meat").
-    
-    2. **Storage Environment & Expiry Date Intelligence**:
-       - When storage location changes (freezer ↔ fridge ↔ pantry), YOU MUST intelligently recalculate the expiry_date
-       - Consider the SPECIFIC item type and category:
-         * Fresh meat, seafood: very sensitive to temperature changes
-         * Dairy products: different shelf life patterns
-         * Vegetables/Fruits: varies by type (leafy greens vs root vegetables)
-         * Frozen foods: may degrade quickly when thawed
-         * Processed/canned foods: more stable
-       - Use your knowledge of food science to determine realistic expiry dates based on:
-         * Current expiry date and remaining shelf life
-         * Item's original state (was it fresh or frozen?)
-         * New storage environment (fridge/freezer/pantry)
-         * Item category and specific food type
-       - Be conservative for safety: when in doubt, use shorter expiry dates
-    
-    3. **Logic** - CRITICAL: NEVER modify parent item's quantity:
-       - Parent items must keep their original quantity for statistical tracking
-       - All quantity changes must create new child items with parent_id
-       
-       - If consuming part of an item (e.g., use 500g from 1000g):
-         * Action 1: MARK_PROCESSED on parent (keeps original 1000g intact)
-         * Action 2: INSERT child with remaining amount (500g, status='in_stock', parent_id)
-         * Action 3: INSERT child for consumed amount (500g, status='consumed', parent_id)
-       
-       - If consuming all (eaten/used up entire item):
-         * Use CONSUME_LOG action (keeps quantity, only changes status to 'consumed')
-       
-       - If item is wasted (spoiled, tastes bad, thrown away):
-         * Use MARK_WASTE action (keeps quantity, only changes status to 'waste')
-       
-       - If moving location ONLY (quantity unchanged):
-         * UPDATE location AND expiry_date (recalculate based on new environment)
-         * DO NOT include quantity in UPDATE
-       
-       - If SPLITTING/DIVIDING (e.g., cut 1kg meat into 250g, 350g, 400g pieces):
-         * Action 1: MARK_PROCESSED on parent (keeps original 1kg)
-         * Action 2+: INSERT child items with parent_id:
-           - For pieces to be stored: INSERT with status='in_stock', include location, expiry_date, parent_id
-           - For pieces consumed immediately: INSERT with status='consumed', parent_id
-         * Each child must have the same item_name, category, unit as parent
-         * Sum of all children quantities should equal original parent quantity
-    
-    4. **Output Format** (Strict JSON list):
-    Examples:
+    ### 任务：
+    生成 JSON 操作计划来执行用户的指令。
+
+    ### 字段格式要求：
+    - item_name: 物品名称（中文）
+    - category: "vegetable", "dairy", "meat", "seafood", "staple", "fruit", "snack", "beverage", "uncategorized"
+    - location: 只能是 "fridge", "freezer", "pantry"（小写，不要用中文）
+    - quantity: 数字，必须与原物品保持相同单位
+    - unit: "kg", "g", "个", "颗", "瓶" 等，必须与原物品一致
+    - expiry_date: YYYY-MM-DD 格式
+    - status: "in_stock", "consumed", "processed", "waste"（小写，用下划线）
+    - parent_id: 分割场景中的父项ID
+
+    ### 核心规则：
+
+    **1. 物品选择逻辑（重要）：**
+
+    a) 含糊描述（如"鸡蛋"、"牛肉"）：
+    → 选择列表中第一个匹配项（最早创建的，实现先进先出）
+
+    b) 带数量描述（如"1.1kg的牛肉"、"500g肉"）：
+    → 在同单位的物品中，选择数量最接近的
+    → 例：用户说"1.1kg牛肉"，库存有 1.19kg 和 500g，选择 1.19kg（同为kg单位且最接近）
+    → 不同单位需要转换后比较：1kg=1000g, 1斤=500g
+
+    c) 带属性描述（如"较大的"、"冰箱里的"）：
+    → "较大/最大/最重" → 选数量最大的（注意单位转换）
+    → "较小/最小/最轻" → 选数量最小的
+    → 位置（"冰箱/冷冻/室温"）→ 匹配 location 字段
+
+    **2. 数量计算：**
+    - 分割操作：所有子项数量之和 = 父项数量
+    - 单位保持：子项必须与父项使用相同单位
+    - 离散单位（颗、个、pack）不能有小数
+    - 计算公式：剩余 = 原数量 - 消耗数量
+
+    **3. 状态转换：**
+    - 部分消耗：MARK_PROCESSED(父项) + INSERT(剩余子项, status='in_stock') + INSERT(消耗子项, status='consumed')
+    - 全部消耗：CONSUME_LOG（直接标记为consumed）
+    - 全部扔掉：MARK_WASTE（标记为waste）
+    - 仅移动位置：UPDATE（只改location和expiry_date，不改quantity）
+
+    **4. 保质期智能计算：**
+    当位置变化时，根据食物类型和新环境重新计算保质期：
+    - 肉类/海鲜：温度敏感
+    - 冷冻→冷藏：大幅缩短
+    - 冷藏→冷冻：延长
+    保守估计，宁短勿长。
+
+    ### 输出格式（JSON数组）：
     [
-      // Consuming PART (500g from 1000g) - MUST use MARK_PROCESSED + INSERT children:
-      {{ "action": "MARK_PROCESSED", "id": 10 }},
-      {{ "action": "INSERT", "item_name": "猪肉", "quantity": 500, "unit": "g", "location": "fridge", "category": "meat", "expiry_date": "2026-02-15", "parent_id": 10, "status": "in_stock" }},
-      {{ "action": "INSERT", "item_name": "猪肉", "quantity": 500, "unit": "g", "category": "meat", "parent_id": 10, "status": "consumed" }},
-      
-      // Consuming ALL (entire item eaten/used):
-      {{ "action": "CONSUME_LOG", "id": 13 }},
-      
-      // Wasted ALL (entire item spoiled/thrown away):
-      {{ "action": "MARK_WASTE", "id": 14 }},
-      
-      // Moving location ONLY (quantity unchanged - no MARK_PROCESSED needed):
-      {{ "action": "UPDATE", "id": 12, "location": "fridge", "expiry_date": "2026-02-16" }},
-      
-      // SPLITTING scenario - cut 1kg meat (ID=15) into 3 pieces (all stored):
-      {{ "action": "MARK_PROCESSED", "id": 15 }},
-      {{ "action": "INSERT", "item_name": "猪肉", "quantity": 250, "unit": "g", "location": "freezer", "category": "meat", "expiry_date": "2026-08-10", "parent_id": 15, "status": "in_stock" }},
-      {{ "action": "INSERT", "item_name": "猪肉", "quantity": 350, "unit": "g", "location": "fridge", "category": "meat", "expiry_date": "2026-02-16", "parent_id": 15, "status": "consumed" }},
-      {{ "action": "INSERT", "item_name": "猪肉", "quantity": 400, "unit": "g", "location": "freezer", "category": "meat", "expiry_date": "2026-08-10", "parent_id": 15, "status": "in_stock" }}
+    // 部分消耗示例（从5颗中吃2颗）
+    {{ "action": "MARK_PROCESSED", "id": 34 }},
+    {{ "action": "INSERT", "item_name": "鸡蛋", "quantity": 3, "unit": "颗", "location": "fridge", "category": "dairy", "expiry_date": "2026-02-20", "parent_id": 34, "status": "in_stock" }},
+    {{ "action": "INSERT", "item_name": "鸡蛋", "quantity": 2, "unit": "颗", "category": "dairy", "parent_id": 34, "status": "consumed" }},
+
+    // 全部消耗
+    {{ "action": "CONSUME_LOG", "id": 12 }},
+
+    // 全部扔掉
+    {{ "action": "MARK_WASTE", "id": 15 }},
+
+    // 仅移动位置
+    {{ "action": "UPDATE", "id": 20, "location": "freezer", "expiry_date": "2026-08-15" }}
     ]
-    
-    CRITICAL REQUIREMENTS:
-    - NEVER modify parent item's quantity - it must remain intact for statistical purposes
-    - For partial consumption, use MARK_PROCESSED + INSERT children (one for remaining, one for consumed)
-    - UPDATE is ONLY for location/expiry changes, NEVER for quantity changes
-    - Include "location" field for INSERT with status='in_stock', can omit for status='consumed'
-    - Always include "expiry_date" in UPDATE and INSERT actions with status='in_stock'
-    - Calculate expiry_date intelligently based on storage location and item category
-    - ALL field values MUST be lowercase (location: "fridge"/"freezer"/"pantry", category: "meat"/"vegetable"/etc., status: "in_stock"/"consumed"/"processed"/"waste")
-    - NEVER use capitalized location names like "Fridge", "Freezer", "Room Temperature"
-    - NEVER use Chinese for location (不要用"冰箱"/"冷冻"/"冷冻室"/"室温"等中文)
-    - When user says "冰箱" → use "fridge", "冷冻/冷冻室" → use "freezer", "室温/常温" → use "pantry"
-    
-    STATUS DECISION GUIDE:
-    - "consumed": Normal consumption (eaten, used up) - use CONSUME_LOG
-    - "waste": Spoiled, tastes bad, thrown away, discarded - use MARK_WASTE
-    - "processed": Item was split/divided into multiple parts - use MARK_PROCESSED (then INSERT children with parent_id)
-    - "in_stock": Currently available in storage
-    
-    WASTE TRIGGERS (use MARK_WASTE when user says):
-    - "坏了", "变质了", "发霉了", "过期了"
-    - "难吃", "太难吃了", "不好吃"
-    - "扔了", "扔掉了", "丢了"
-    - "不要了", "不想要了"
+
+    ### 关键约束：
+    1. 含糊描述时，必须选择列表中第一个匹配项（FIFO原则）
+    2. 数量描述时，选择同单位中数量最接近的
+    3. 父项数量永远不变，所有数量变化通过子项实现
+    4. 所有子项数量之和必须等于父项数量
+    5. 不要在 UPDATE 中修改 quantity
+    6. location 只能用英文小写："fridge"、"freezer"、"pantry"
     """
 
     print("🤖 正在思考如何操作数据库...")
@@ -390,8 +420,31 @@ def parse_and_execute(user_command):
         
         plan = json.loads(response.text)
         print(f"📋 AI 计划执行 {len(plan)} 个动作。")
-        # print("🔍 调试：AI 返回的计划：")
-        # print(json.dumps(plan, indent=2, ensure_ascii=False))
+        print("🔍 AI 返回的完整计划：")
+        print(json.dumps(plan, indent=2, ensure_ascii=False))
+        
+        # 验证 AI 选择的项目是否正确（FIFO检查）
+        print("\n🔎 验证项目选择...")
+        for action in plan:
+            if action.get('action') in ['MARK_PROCESSED', 'CONSUME_LOG', 'MARK_WASTE'] and 'id' in action:
+                selected_id = action['id']
+                selected_item = next((item for item in current_inventory if item['id'] == selected_id), None)
+                if selected_item:
+                    item_name = selected_item['name']
+                    # 查找同名的其他项目
+                    same_name_items = [item for item in current_inventory if item['name'] == item_name]
+                    if len(same_name_items) > 1:
+                        # 检查是否选择了第一个（最早创建的）
+                        first_item = same_name_items[0]
+                        if selected_id != first_item['id']:
+                            print(f"   ⚠️  警告：发现多个 '{item_name}'")
+                            print(f"      AI 选择了 ID {selected_id} (创建:{selected_item.get('created', 'N/A')})")
+                            print(f"      但最早的是 ID {first_item['id']} (创建:{first_item.get('created', 'N/A')})")
+                            print(f"      如果用户命令没有特别指定，应优先消耗最早的项目（FIFO）")
+                        else:
+                            print(f"   ✓ 正确选择了最早创建的 '{item_name}' (ID {selected_id})")
+                    else:
+                        print(f"   ✓ 选择了唯一的 '{item_name}' (ID {selected_id})")
         
         # 3. 执行（传入库存快照用于验证）
         execute_actions(plan, current_inventory)
