@@ -161,14 +161,159 @@ def get_inventory_context():
     return "\n".join(inventory_lines)
 
 # ==========================================
-# 4. 生成建议 (Generation)
+# 4. 生成建议 (Generation) - 支持连续对话
 # ==========================================
+def save_conversation_history(contents, inventory_context):
+    """保存对话历史到 markdown 文件"""
+    if not contents:
+        print("📝 无对话内容，不生成记录。")
+        return
+    
+    try:
+        os.makedirs(suggestions_dir, exist_ok=True)
+        
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        filename = f"conversation_{timestamp}.md"
+        filepath = os.path.join(suggestions_dir, filename)
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(f"# 厨师对话记录\n\n")
+            f.write(f"**时间**: {datetime.datetime.now().strftime('%Y年%m月%d日 %H:%M:%S')}\n\n")
+            f.write(f"---\n\n")
+            f.write(f"## 库存快照\n\n```\n{inventory_context}\n```\n\n")
+            f.write(f"---\n\n")
+            f.write(f"## 对话内容\n\n")
+            
+            for i, msg in enumerate(contents, 1):
+                role = "🍳 你" if msg.role == "user" else "👨‍🍳 厨师"
+                text = msg.parts[0].text if msg.parts else ""
+                f.write(f"### {role}\n\n{text}\n\n")
+            
+        print(f"✅ 对话记录已保存到: suggestions/{filename}")
+        
+    except Exception as e:
+        print(f"❌ 保存对话记录失败: {e}")
+
+
+def ask_chef_continuous():
+    """连续对话模式的主函数"""
+    import time
+    
+    # 初始化对话历史
+    contents = []
+    
+    # 获取库存上下文（仅在开始时获取一次，或者可以在每次询问时更新）
+    inventory_context = get_inventory_context()
+    
+    # 配置生成参数
+    tools = [
+        types.Tool(url_context=types.UrlContext()),
+        types.Tool(googleSearch=types.GoogleSearch()),
+    ]
+    
+    generate_content_config = types.GenerateContentConfig(
+        thinking_config=types.ThinkingConfig(
+            thinking_level="HIGH",
+        ),
+        tools=tools,
+        system_instruction=[
+            types.Part.from_text(text=f"""
+{USER_DEFINED_PROMPT}
+
+{inventory_context}
+"""),
+        ],
+    )
+    
+    print("👨‍🍳 厨师已就位！输入 'quit' 或 'exit' 退出对话，输入 'refresh' 刷新库存信息。\n")
+    
+    while True:
+        # 获取用户输入
+        try:
+            user_input = input("🍳 你: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n\n👋 再见！")
+            save_conversation_history(contents, inventory_context)
+            break
+            
+        if not user_input:
+            continue
+            
+        # 退出命令
+        if user_input.lower() in ['quit', 'exit', '退出']:
+            print("\n👋 再见！")
+            save_conversation_history(contents, inventory_context)
+            break
+            
+        # 刷新库存命令
+        if user_input.lower() in ['refresh', '刷新']:
+            inventory_context = get_inventory_context()
+            generate_content_config.system_instruction = [
+                types.Part.from_text(text=f"""
+{USER_DEFINED_PROMPT}
+
+{inventory_context}
+"""),
+            ]
+            print("✅ 库存信息已刷新\n")
+            continue
+        
+        # 将用户消息添加到对话历史
+        contents.append(
+            types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=user_input)],
+            )
+        )
+        
+        print("\n👨‍🍳 厨师: ", end="", flush=True)
+        
+        # 添加重试机制
+        max_retries = 3
+        retry_delay = 2  # 秒
+        
+        for attempt in range(max_retries):
+            try:
+                # 使用流式生成
+                assistant_response = ""
+                for chunk in client.models.generate_content_stream(
+                    model='gemini-3-pro-preview',
+                    contents=contents,
+                    config=generate_content_config,
+                ):
+                    if chunk.text:
+                        print(chunk.text, end="", flush=True)
+                        assistant_response += chunk.text
+                
+                print("\n")
+                
+                # 将助手回复添加到对话历史
+                contents.append(
+                    types.Content(
+                        role="model",
+                        parts=[types.Part.from_text(text=assistant_response)],
+                    )
+                )
+                break  # 成功则跳出重试循环
+                
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(f"\n⚠️  连接失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+                    print(f"🔄 {retry_delay} 秒后重试...\n")
+                    time.sleep(retry_delay)
+                    print("👨‍🍳 厨师: ", end="", flush=True)
+                else:
+                    print(f"\n❌ AI 生成失败 (已重试 {max_retries} 次): {e}\n")
+                    # 移除失败的用户消息
+                    contents.pop()
+
+
 def ask_chef(user_request):
+    """单次对话模式（保持向后兼容）"""
     # 1. 准备数据
     inventory_context = get_inventory_context()
     
     # 2. 组装最终 Prompt
-    # 逻辑：系统设定 + 实时库存 + 用户当前的需求
     final_prompt = f"""
     {USER_DEFINED_PROMPT}
 
@@ -181,10 +326,9 @@ def ask_chef(user_request):
     print("👨‍🍳 厨师正在查看冰箱并思考菜谱...")
 
     try:
-        # 3. 调用 AI (建议使用 Pro 模型以获得最佳推理效果)
-        # 可选模型: 'gemini-2.0-flash-exp', 'gemini-1.5-pro', 'gemini-2.0-flash'
+        # 3. 调用 AI
         response = client.models.generate_content(
-            model='gemini-3-pro-preview',  # 推荐使用实验版以获得最佳效果
+            model='gemini-3-pro-preview',
             contents=final_prompt
         )
         
@@ -192,7 +336,7 @@ def ask_chef(user_request):
         
         # 4. 输出并保存
         print("\n" + "="*30)
-        print(content) # 打印在屏幕上
+        print(content)
         print("="*30)
         
         # 确保目录存在
@@ -216,14 +360,20 @@ def ask_chef(user_request):
 if __name__ == "__main__":
     import sys
     
-    # 默认请求：如果没有输入，就做全套（备餐 + 采购）
-    default_request = "请根据我现在的库存，1. 提供一次备餐建议，2. 分析库存结构并给出采购建议。"
-    
-    if len(sys.argv) > 1:
-        request = sys.argv[1]
+    # 检查是否使用交互模式
+    if len(sys.argv) > 1 and sys.argv[1] in ['-i', '--interactive', 'chat', '对话']:
+        # 连续对话模式
+        ask_chef_continuous()
     else:
-        print(f"💡 提示: 你可以在命令行输入具体需求，例如: uv run src/consult_chef.py '我想吃辣的'")
-        print(f"👉 使用默认需求: {default_request}\n")
-        request = default_request
+        # 单次查询模式（保持向后兼容）
+        default_request = "请根据我现在的库存，1. 提供一次备餐建议，2. 分析库存结构并给出采购建议。"
         
-    ask_chef(request)
+        if len(sys.argv) > 1 and sys.argv[1] not in ['-i', '--interactive', 'chat', '对话']:
+            request = sys.argv[1]
+        else:
+            print(f"💡 提示: 你可以在命令行输入具体需求，例如: uv run src/consult_chef.py '我想吃辣的'")
+            print(f"💡 提示: 使用 'uv run src/consult_chef.py -i' 或 'uv run src/consult_chef.py chat' 进入连续对话模式")
+            print(f"👉 使用默认需求: {default_request}\n")
+            request = default_request
+            
+        ask_chef(request)
