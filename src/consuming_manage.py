@@ -33,12 +33,12 @@ def fetch_current_inventory():
     """获取所有在库物品，供 AI 参考"""
     conn = get_db_connection()
     cur = conn.cursor()
-    # 按创建时间排序，实现先进先出（FIFO）
+    # 按保质期排序（最早过期的优先），保质期相同时按创建时间排序（FIFO）
     cur.execute("""
         SELECT id, item_name, quantity, unit, location, expiry_date, status, created_at
         FROM inventory 
         WHERE UPPER(status) = 'IN_STOCK'
-        ORDER BY created_at ASC
+        ORDER BY expiry_date ASC NULLS LAST, created_at ASC
     """)
     rows = cur.fetchall()
     
@@ -77,6 +77,7 @@ def execute_actions(actions, inventory_snapshot=None):
                 parent_id = action['parent_id']
                 new_qty = action['quantity']
                 unit = action['unit']
+                child_status = action.get('status', 'in_stock')
                 
                 # 从快照中找到父项数据
                 parent = next((item for item in inventory_snapshot if item['id'] == parent_id), None)
@@ -84,6 +85,19 @@ def execute_actions(actions, inventory_snapshot=None):
                     parent_qty = parent['qty']
                     parent_unit = parent['unit']
                     item_name = parent['name']
+                    
+                    # 检查：0或接近0的数量
+                    if new_qty <= 0.01:
+                        has_errors = True
+                        print(f"\n   ❌ 【严重错误】AI试图创建0数量的子项")
+                        print(f"       物品: {item_name}")
+                        print(f"       父项ID {parent_id}: 总量 {parent_qty}{parent_unit}")
+                        print(f"       子项数量: {new_qty}{unit} (状态: {child_status})")
+                        print(f"       ")
+                        print(f"       💡 这表明是完全消耗的场景！")
+                        print(f"       正确做法: 直接使用 CONSUME_LOG 而不是分割")
+                        print(f"       示例: {{ \"action\": \"CONSUME_LOG\", \"id\": {parent_id} }}")
+                        continue  # 跳过后续检查，不要重复父项数据获取
                     
                     # 检查：单位不匹配
                     if unit != parent_unit:
@@ -180,15 +194,15 @@ def execute_actions(actions, inventory_snapshot=None):
                 else:
                     print(f"   ✓ ID {parent_id} ({item_name}): 子项总和 {children_sum}{parent_unit} = 父项 {parent_qty}{parent_unit}")
         
-        if not has_warnings:
-            print("   ✅ 验证通过，无异常")
-        elif has_errors:
+        if has_errors:
             print("\n   ❌ 发现严重错误，中止执行！")
             print("   请检查用户命令或AI的理解是否有误")
             conn.close()
             return
-        else:
+        elif has_warnings:
             print("\n   ⚠️  发现异常，但将继续执行。如需中止请按 Ctrl+C")
+        else:
+            print("   ✅ 验证通过，无异常")
     
     try:
         for action in actions:
@@ -238,6 +252,13 @@ def execute_actions(actions, inventory_snapshot=None):
                 
                 if parent_id:
                     # 有父节点：这是分割子节点
+                    # 如果AI没有提供expiry_date，从父项继承
+                    expiry_date = action.get('expiry_date')
+                    if not expiry_date and inventory_snapshot:
+                        parent_item = next((item for item in inventory_snapshot if item['id'] == parent_id), None)
+                        if parent_item:
+                            expiry_date = parent_item.get('exp')
+                    
                     sql = """
                         INSERT INTO inventory (item_name, category, location, quantity, unit, expiry_date, status, parent_id)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
@@ -248,12 +269,13 @@ def execute_actions(actions, inventory_snapshot=None):
                         action.get('location', 'fridge'),  # consumed 的可能没有 location
                         action['quantity'],
                         action['unit'],
-                        action.get('expiry_date'),
+                        expiry_date,
                         child_status,
                         parent_id
                     ))
                     status_emoji = "🗑️" if child_status == 'consumed' else "📦"
-                    print(f"   {status_emoji} 新增子项 (父ID={parent_id}): {action['item_name']} ({action['quantity']}{action['unit']}) -> {child_status}")
+                    expiry_info = f" [保质期:{expiry_date}]" if expiry_date else ""
+                    print(f"   {status_emoji} 新增子项 (父ID={parent_id}): {action['item_name']} ({action['quantity']}{action['unit']}) -> {child_status}{expiry_info}")
                 else:
                     # 无父节点：普通新增
                     sql = """
@@ -318,15 +340,16 @@ def parse_and_execute(user_command):
     
     # 打印用户命令中提到的物品的当前库存（用于审计）
     print(f"📝 用户命令: {user_command}")
-    print("📦 当前所有在库物品（按创建时间排序，先进先出）:")
+    print("📦 当前所有在库物品（按保质期排序，早过期的优先）:")
     for item in current_inventory:
         created_info = f" [创建:{item['created']}]" if item.get('created') else ""
-        print(f"   ID {item['id']}: {item['name']} = {item['qty']}{item['unit']} @ {item['loc']}{created_info}")
+        expiry_info = f" [保质期:{item['exp']}]" if item.get('exp') else ""
+        print(f"   ID {item['id']}: {item['name']} = {item['qty']}{item['unit']} @ {item['loc']}{expiry_info}{created_info}")
 
     prompt = f"""
     你是家庭库存管理系统的数据库管理员。今天是 {today}。
 
-    ### 当前库存（按创建时间排序，最早的在前）：
+    ### 当前库存（按保质期排序，最早过期的在前，保质期相同时按创建时间排序）：
     {inventory_str}
 
     ### 用户指令：
@@ -350,7 +373,7 @@ def parse_and_execute(user_command):
     **1. 物品选择逻辑（重要）：**
 
     a) 含糊描述（如"鸡蛋"、"牛肉"）：
-    → 选择列表中第一个匹配项（最早创建的，实现先进先出）
+    → 选择列表中第一个匹配项（保质期最早的，优先消耗快过期的）
 
     b) 带数量描述（如"1.1kg的牛肉"、"500g肉"）：
     → 在同单位的物品中，选择数量最接近的
@@ -362,17 +385,38 @@ def parse_and_execute(user_command):
     → "较小/最小/最轻" → 选数量最小的
     → 位置（"冰箱/冷冻/室温"）→ 匹配 location 字段
 
-    **2. 数量计算：**
-    - 分割操作：所有子项数量之和 = 父项数量
-    - 单位保持：子项必须与父项使用相同单位
-    - 离散单位（颗、个、pack）不能有小数
-    - 计算公式：剩余 = 原数量 - 消耗数量
+    **2. 数量计算与判断流程（关键）：**
+    
+    步骤1：单位转换（如需要）
+    - 1kg = 1000g, 1斤 = 500g
+    - 将用户指定的消耗量转换为与库存相同的单位
+    
+    步骤2：计算剩余量
+    - 剩余 = 原数量 - 消耗数量
+    - 例：0.5kg - 500g = 0.5kg - 0.5kg = 0kg
+    - 例：800g - 570g = 230g
+    
+    步骤3：判断消耗类型（在此步骤决定使用哪种操作）
+    - 如果 剩余量 ≤ 0.01（或几乎为0）→ **完全消耗** → 使用 CONSUME_LOG
+    - 如果 剩余量 > 0.01 → **部分消耗** → 使用 MARK_PROCESSED + INSERT 分割
+    
+    **关键示例**：
+    - 库存0.5kg，消耗500g → 0.5kg - 0.5kg = 0kg → 完全消耗 → CONSUME_LOG
+    - 库存0.8kg，消耗570g → 0.8kg - 0.57kg = 0.23kg → 部分消耗 → 分割
+    - 库存5个，消耗5个 → 5 - 5 = 0 → 完全消耗 → CONSUME_LOG
+    - 库存5个，消耗2个 → 5 - 2 = 3 → 部分消耗 → 分割
+    
+    **约束**：
+    - 子项数量之和 = 父项数量（分割时）
+    - 子项单位必须与父项一致
+    - 离散单位（颗、个、pack、piece）不能有小数
+    - 不要创建0或接近0的子项
 
-    **3. 状态转换：**
-    - 部分消耗：MARK_PROCESSED(父项) + INSERT(剩余子项, status='in_stock') + INSERT(消耗子项, status='consumed')
-    - 全部消耗：CONSUME_LOG（直接标记为consumed）
-    - 全部扔掉：MARK_WASTE（标记为waste）
-    - 仅移动位置：UPDATE（只改location和expiry_date，不改quantity）
+    **3. 状态转换操作：**
+    - **完全消耗**：CONSUME_LOG（一步完成，推荐）
+    - **部分消耗**：MARK_PROCESSED + INSERT(剩余, in_stock) + INSERT(消耗, consumed)
+    - **全部扔掉**：MARK_WASTE
+    - **仅移动**：UPDATE(location/expiry_date)
 
     **4. 保质期智能计算：**
     当位置变化时，根据食物类型和新环境重新计算保质期：
@@ -383,28 +427,42 @@ def parse_and_execute(user_command):
 
     ### 输出格式（JSON数组）：
     [
-    // 部分消耗示例（从5颗中吃2颗）
+    // 示例1：完全消耗（库存0.5kg，消耗500g = 0.5kg，剩余0）
+    {{ "action": "CONSUME_LOG", "id": 50 }},
+    
+    // 示例2：完全消耗（库存5个，消耗5个，剩余0）
+    {{ "action": "CONSUME_LOG", "id": 42 }},
+    
+    // 示例3：部分消耗（库存5颗，消耗2颗，剩余3颗）
     {{ "action": "MARK_PROCESSED", "id": 34 }},
-    {{ "action": "INSERT", "item_name": "鸡蛋", "quantity": 3, "unit": "颗", "location": "fridge", "category": "dairy", "expiry_date": "2026-02-20", "parent_id": 34, "status": "in_stock" }},
-    {{ "action": "INSERT", "item_name": "鸡蛋", "quantity": 2, "unit": "颗", "category": "dairy", "parent_id": 34, "status": "consumed" }},
+    {{ "action": "INSERT", "item_name": "鸡蛋", "quantity": 3, "unit": "颗", "location": "fridge", "category": "dairy", "expiry_date": "2026-02-20", "parent_id": 34, "status": "in_stock" }},  // 剩余3颗
+    {{ "action": "INSERT", "item_name": "鸡蛋", "quantity": 2, "unit": "颗", "category": "dairy", "expiry_date": "2026-02-20", "parent_id": 34, "status": "consumed" }},  // 消耗2颗
+    
+    // 示例4：部分消耗（库存0.8kg，消耗570g=0.57kg，剩余0.23kg）
+    {{ "action": "MARK_PROCESSED", "id": 3 }},
+    {{ "action": "INSERT", "item_name": "带骨羊腿", "quantity": 0.23, "unit": "kg", "location": "freezer", "category": "meat", "expiry_date": "2026-08-01", "parent_id": 3, "status": "in_stock" }},  // 剩余0.23kg
+    {{ "action": "INSERT", "item_name": "带骨羊腿", "quantity": 0.57, "unit": "kg", "category": "meat", "expiry_date": "2026-08-01", "parent_id": 3, "status": "consumed" }},  // 消耗0.57kg
 
-    // 全部消耗
-    {{ "action": "CONSUME_LOG", "id": 12 }},
-
-    // 全部扔掉
+    // 示例5：全部扔掉
     {{ "action": "MARK_WASTE", "id": 15 }},
 
-    // 仅移动位置
+    // 示例6：仅移动位置
     {{ "action": "UPDATE", "id": 20, "location": "freezer", "expiry_date": "2026-08-15" }}
     ]
 
-    ### 关键约束：
-    1. 含糊描述时，必须选择列表中第一个匹配项（FIFO原则）
-    2. 数量描述时，选择同单位中数量最接近的
-    3. 父项数量永远不变，所有数量变化通过子项实现
-    4. 所有子项数量之和必须等于父项数量
-    5. 不要在 UPDATE 中修改 quantity
-    6. location 只能用英文小写："fridge"、"freezer"、"pantry"
+    ### 关键约束（按优先级）：
+    1. **最高优先**：先计算剩余量，判断是完全消耗还是部分消耗
+       - 剩余量 ≤ 0.01 → 使用 CONSUME_LOG（一步完成）
+       - 剩余量 > 0.01 → 使用 MARK_PROCESSED + INSERT 分割
+    2. 含糊描述时，选择列表中第一个匹配项（保质期最早的）
+    3. 数量描述时，选择同单位中数量最接近的
+    4. 分割时：所有子项数量之和必须等于父项数量
+    5. 分割时：剩余部分status="in_stock"，消耗部分status="consumed"
+    6. 所有子项必须继承父项的expiry_date
+    7. 父项数量永远不变，通过子项实现数量变化
+    8. 不要在UPDATE中修改quantity
+    9. location只能用小写："fridge"、"freezer"、"pantry"
+    10. **禁止**创建0或接近0（≤0.01）的子项
     """
 
     print("🤖 正在思考如何操作数据库...")
@@ -423,7 +481,7 @@ def parse_and_execute(user_command):
         print("🔍 AI 返回的完整计划：")
         print(json.dumps(plan, indent=2, ensure_ascii=False))
         
-        # 验证 AI 选择的项目是否正确（FIFO检查）
+        # 验证 AI 选择的项目是否正确（保质期优先检查）
         print("\n🔎 验证项目选择...")
         for action in plan:
             if action.get('action') in ['MARK_PROCESSED', 'CONSUME_LOG', 'MARK_WASTE'] and 'id' in action:
@@ -434,15 +492,15 @@ def parse_and_execute(user_command):
                     # 查找同名的其他项目
                     same_name_items = [item for item in current_inventory if item['name'] == item_name]
                     if len(same_name_items) > 1:
-                        # 检查是否选择了第一个（最早创建的）
+                        # 检查是否选择了第一个（保质期最早的）
                         first_item = same_name_items[0]
                         if selected_id != first_item['id']:
                             print(f"   ⚠️  警告：发现多个 '{item_name}'")
-                            print(f"      AI 选择了 ID {selected_id} (创建:{selected_item.get('created', 'N/A')})")
-                            print(f"      但最早的是 ID {first_item['id']} (创建:{first_item.get('created', 'N/A')})")
-                            print(f"      如果用户命令没有特别指定，应优先消耗最早的项目（FIFO）")
+                            print(f"      AI 选择了 ID {selected_id} (保质期:{selected_item.get('exp', 'N/A')})")
+                            print(f"      但保质期最早的是 ID {first_item['id']} (保质期:{first_item.get('exp', 'N/A')})")
+                            print(f"      如果用户命令没有特别指定，应优先消耗保质期最早的项目")
                         else:
-                            print(f"   ✓ 正确选择了最早创建的 '{item_name}' (ID {selected_id})")
+                            print(f"   ✓ 正确选择了保质期最早的 '{item_name}' (ID {selected_id}, 保质期:{selected_item.get('exp', 'N/A')})")
                     else:
                         print(f"   ✓ 选择了唯一的 '{item_name}' (ID {selected_id})")
         
