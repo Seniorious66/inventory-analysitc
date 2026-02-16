@@ -397,8 +397,8 @@ def parse_and_execute(user_command):
     - 例：800g - 570g = 230g
     
     步骤3：判断消耗类型（在此步骤决定使用哪种操作）
-    - 如果 剩余量 ≤ 0.01（或几乎为0）→ **完全消耗** → 使用 CONSUME_LOG
-    - 如果 剩余量 > 0.01 → **部分消耗** → 使用 MARK_PROCESSED + INSERT 分割
+    - 如果 剩余量 ≤ 0.05（或几乎为0）→ **完全消耗** → 使用 CONSUME_LOG
+    - 如果 剩余量 > 0.05 → **部分消耗** → 使用 MARK_PROCESSED + INSERT 分割
     
     **关键示例**：
     - 库存0.5kg，消耗500g → 0.5kg - 0.5kg = 0kg → 完全消耗 → CONSUME_LOG
