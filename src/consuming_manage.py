@@ -373,7 +373,28 @@ def parse_and_execute(user_command):
     **1. 物品选择逻辑（重要）：**
 
     a) 含糊描述（如"鸡蛋"、"牛肉"）：
-    → 选择列表中第一个匹配项（保质期最早的，优先消耗快过期的）
+    → 按照FIFO原则（First In First Out），选择列表中第一个匹配项（保质期最早的，优先消耗快过期的）
+    → **关键：如果第一个项的数量不足以满足全部消耗需求，必须按顺序依次消耗多个项**
+    
+    **FIFO多项消耗示例（重要）：**
+    用户命令："消耗4个鸡蛋"
+    库存列表（已按保质期排序）：
+    - ID 10: 鸡蛋 2个 (保质期:2026-02-20)
+    - ID 20: 鸡蛋 24个 (保质期:2026-02-25)
+    
+    正确做法：
+    1. 先完全消耗 ID 10（2个鸡蛋）→ CONSUME_LOG
+    2. 再部分消耗 ID 20（消耗2个，剩余22个）→ MARK_PROCESSED + INSERT 分割
+    
+    错误做法：
+    - ❌ 跳过 ID 10，直接从 ID 20 消耗4个
+    - ❌ 只从 ID 20 消耗4个
+    
+    **流程**：
+    1. 计算第一项的可消耗量
+    2. 如果可消耗量 ≥ 需求量 → 消耗第一项（部分或全部）
+    3. 如果可消耗量 < 需求量 → 完全消耗第一项，剩余需求继续从下一项消耗
+    4. 重复步骤1-3，直到需求量=0
 
     b) 带数量描述（如"1.1kg的牛肉"、"500g肉"）：
     → 在同单位的物品中，选择数量最接近的
@@ -469,7 +490,7 @@ def parse_and_execute(user_command):
     
     try:
         response = client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-2.5-flash',
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type='application/json'

@@ -52,7 +52,22 @@ class NewImageHandler(FileSystemEventHandler):
 
             # --- Step 2: 自动入库 ---
             print("   🚀 2. 开始写入数据库...")
-            load_json_to_db(json_filename)
+            result = load_json_to_db(json_filename)
+            
+            # 打印入库详细信息
+            if result and result.get('success'):
+                print(f"\n   📦 入库成功！共入库 {result['count']} 件物品：")
+                for idx, item in enumerate(result.get('items', []), 1):
+                    item_name = item.get('item_name', '未知')
+                    quantity = item.get('quantity', 1)
+                    unit = item.get('unit', '个')
+                    location = item.get('location', '未知位置')
+                    expiry = item.get('expiry_date', '无')
+                    print(f"      {idx}. {item_name} - {quantity}{unit} - {location} - 保质期: {expiry}")
+                print()
+            else:
+                print(f"   ❌ 入库失败: {result.get('error', '未知错误')}")
+                return
             
             # --- Step 3: 归档图片 ---
             print("   🧹 3. 归档图片...")

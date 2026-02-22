@@ -65,6 +65,7 @@ def load_json_to_db(filename):
         # 4. 循环写入
         print("   🚀 开始写入数据库...")
         success_count = 0
+        inserted_items = []
         
         for item in inventory_data:
             # 数据清洗：确保必要的字段存在
@@ -81,6 +82,7 @@ def load_json_to_db(filename):
             
             cur.execute(sql_query, record)
             success_count += 1
+            inserted_items.append(item)
 
         # 5. 提交事务
         conn.commit()
@@ -89,13 +91,18 @@ def load_json_to_db(filename):
         # 6. 关闭
         cur.close()
         conn.close()
+        
+        # 7. 返回入库信息
+        return {'success': True, 'count': success_count, 'items': inserted_items}
 
     except FileNotFoundError:
         print(f"❌ 错误：在 data 文件夹里找不到 {filename}")
+        return {'success': False, 'error': f'文件未找到: {filename}'}
     except Exception as e:
         print(f"❌ 发生未知错误: {e}")
         if 'conn' in locals():
             conn.rollback()
+        return {'success': False, 'error': str(e)}
 
 # ==========================================
 # 3. 主程序入口
