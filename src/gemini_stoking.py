@@ -118,7 +118,7 @@ def analyze_image(image_filename=None):
     try:
         # --- 新版 API 调用核心 ---
         response = client.models.generate_content(
-            model='gemini-2.0-flash', # 推荐先用 2.0 Flash，稳定且快
+            model='gemini-2.5-flash-lite', # 推荐先用 2.0 Flash，稳定且快
             contents=[prompt_text, image],
             config=types.GenerateContentConfig(
                 response_mime_type='application/json' # 🔥 核心功能：强制返回 JSON
